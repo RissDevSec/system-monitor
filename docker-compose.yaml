@@ -1,0 +1,17 @@
+services:
+  system-monitor:
+    container_name: system-monitor
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: system-monitor:latest
+    environment:
+      - CHAT_ID=${CHAT_ID}
+      - BOT_KEY=${BOT_KEY}
+      - PROCFS_PATH=${PROCFS_PATH}
+      - DISK_PATH=${DISK_PATH}
+    volumes:
+      - /proc:/host/proc:ro
+      - /:/host/root:ro
+      - ./logs:/app/logs
