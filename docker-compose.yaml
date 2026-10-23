@@ -11,6 +11,12 @@ services:
       - BOT_KEY=${BOT_KEY}
       - PROCFS_PATH=${PROCFS_PATH}
       - DISK_PATH=${DISK_PATH}
+      - DEBUG=${DEBUG:-0}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - /proc:/host/proc:ro
       - /:/host/root:ro
