@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/python-3.12-blue?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-A containerized system monitor that watches the **host machine's** CPU, RAM, and disk usage, and sends a Telegram alert whenever any of them crosses a threshold. Built to run continuously as a Docker service, with restart resilience and persistent error logging.
+A containerized system monitor that watches the **host machine's** CPU, RAM, and disk usage, and sends a Telegram alert whenever any of them crosses a threshold. Built to run continuously as a Docker service, with restart resilience and structured logging.
 
 ## ✨ Features
 
@@ -13,7 +13,7 @@ A containerized system monitor that watches the **host machine's** CPU, RAM, and
 - 🔕 **Alert deduplication** — no spam: an alert only fires on a state change (normal → warning, or warning → normal), not on every check
 - 🐳 **True host monitoring from a container** — mounts the host's `/proc` and root filesystem (read-only) so the numbers reflect the actual machine, not just the container's own limited view
 - 🔁 **Self-healing** — configured with `restart: unless-stopped`, so the monitor comes back up automatically after a crash or host reboot
-- 📁 **Persistent error logs** — connection/API failures are written to a log file on the host (survives container restarts) and also to stderr for live `docker logs` visibility
+- 📝 **Structured logging with Loguru** — color-aware console output (routine status on stdout, warnings/errors on stderr), rotating text and JSON logs on the host, a capped Docker log, and `DEBUG=1` for verbose output
 
 ## 🧠 Why host mounting matters
 
@@ -46,9 +46,10 @@ BOT_KEY=your_telegram_bot_token_here
 CHAT_ID=your_telegram_chat_id_here
 PROCFS_PATH=/host/proc
 DISK_PATH=/host/root
+DEBUG=0
 ```
 
-`PROCFS_PATH` and `DISK_PATH` should stay as shown above — they point to where the host's filesystem is mounted *inside the container* (see `docker-compose.yaml`).
+`PROCFS_PATH` and `DISK_PATH` should stay as shown above — they point to where the host's filesystem is mounted *inside the container* (see `docker-compose.yaml`). Set `DEBUG=1` to enable verbose console and file logging; leave it at `0` during normal operation.
 
 ### 4. Build and run
 
@@ -68,6 +69,8 @@ To see only errors (filtering out the routine status lines):
 docker compose logs system-monitor 2>&1 1>/dev/null
 ```
 
+Routine status lines go to stdout, while warnings and errors go to stderr. Logs are also persisted on the host in `./logs/monitor.log` and `./logs/monitor.json`; both files rotate at 10 MB and are kept for 7 days. Docker's own `json-file` log is capped at 10 MB × 3 files. If `./logs` is not writable, the monitor keeps running with console-only logging and emits a warning.
+
 ### Stopping the monitor
 
 ```bash
@@ -77,13 +80,14 @@ docker compose down
 ## 📖 Example output
 
 ```
-System monitor started. Checking every 2 seconds. Press Ctrl+C to stop.
-[2026-09-02 09:03:32] CPU: 9% | RAM: 82% (6.1/7.5 GB) ⚠ WARNING | Disk: 55%
-
-[2026-09-02 09:03:34] CPU: 13% | RAM: 83% (6.2/7.5 GB) ⚠ WARNING | Disk: 55%
+[2026-09-02 09:03:32] [INFO] System monitor started. Checking every 2 seconds. Press Ctrl+C to stop.
+[2026-09-02 09:03:32] [WARNING] CPU: 9% | RAM: 82% (6.1/7.5 GB) WARNING | Disk: 55%
+[2026-09-02 09:03:34] [WARNING] CPU: 13% | RAM: 83% (6.2/7.5 GB) WARNING | Disk: 55%
 ```
 
-When RAM first crosses 80%, a single Telegram alert is sent (`⚠ WARNING - RAM almost full!`). No further alerts are sent while it stays above 80% — only when it drops back down (`✓ INFO - RAM back to normal`) or crosses the threshold again later.
+While a metric is above its threshold, status lines are logged at `WARNING`; Telegram still only receives alerts on state changes. Console and file logs stay plain text so they render reliably in terminals, CI, and log viewers; the colored icons are used only in Telegram messages.
+
+When RAM first crosses 80%, a single Telegram alert is sent (`⚠️ WARNING - RAM almost full!`). No further alerts are sent while it stays above 80% — only when it drops back down (`✅ INFO - RAM back to normal`) or crosses the threshold again later.
 
 ## 🧪 Testing the Telegram connection
 
@@ -98,6 +102,7 @@ docker compose run --rm system-monitor python notifier.py
 - Python 3.12
 - [psutil](https://github.com/giampaolo/psutil) — system resource stats
 - [requests](https://requests.readthedocs.io/) — Telegram Bot API calls
+- [Loguru](https://github.com/Delgan/loguru) — structured console and file logging
 - Docker & Docker Compose
 
 ## 📁 Project Structure
@@ -105,8 +110,9 @@ docker compose run --rm system-monitor python notifier.py
 ```
 system-monitor/
 ├── main.py              # Monitoring loop and threshold logic
-├── notifier.py          # Telegram notifications and error logging
-├── logs/                # Persisted error logs (gitignored)
+├── notifier.py          # Telegram notifications and API error handling
+├── logger_config.py     # Loguru sinks (console, text/JSON, DEBUG mode)
+├── logs/                # Rotating monitor.log and monitor.json (gitignored)
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yaml
