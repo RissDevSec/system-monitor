@@ -16,7 +16,7 @@ from metrics import (
     SystemMetricsCollector,
     build_metric_specs,
 )
-from notifier import message_warning
+from notifier import TelegramError, TelegramNotifier
 
 WARNING_ICON = "\N{WARNING SIGN}\N{VARIATION SELECTOR-16}"
 OK_ICON = "\N{WHITE HEAVY CHECK MARK}"
@@ -26,6 +26,7 @@ def check_once(
     collector: SystemMetricsCollector,
     specs: tuple[MetricSpec, ...],
     state: dict[str, bool],
+    notifier: TelegramNotifier,
 ) -> dict[str, MetricReading]:
     """Collect one reading and notify only when a metric changes state."""
     readings = collector.collect(specs)
@@ -44,7 +45,10 @@ def check_once(
             state[key] = False
 
     if message:
-        message_warning(message)
+        try:
+            notifier.send(message)
+        except TelegramError as error:
+            logger.error("Failed to send Telegram notification: {}", error)
 
     return readings
 
@@ -73,6 +77,7 @@ def main() -> int:
 
     specs = build_metric_specs(config)
     collector = SystemMetricsCollector(config.procfs_path, config.disk_path)
+    notifier = TelegramNotifier(config.bot_key, config.chat_id)
     state = {spec.key: False for spec in specs}
 
     logger.info(
@@ -101,7 +106,7 @@ def main() -> int:
             started = time.monotonic()
 
             try:
-                readings = check_once(collector, specs, state)
+                readings = check_once(collector, specs, state, notifier)
                 status = format_status(readings)
 
                 if any(reading.is_warning for reading in readings.values()):
