@@ -8,8 +8,10 @@ import psutil
 from dotenv import load_dotenv
 from loguru import logger
 
+from alerts import AlertTracker
 from config import ConfigError, load_config
 from logger_config import setup_logger
+from messages import format_alert, format_status
 from metrics import (
     MetricReading,
     MetricSpec,
@@ -18,51 +20,73 @@ from metrics import (
 )
 from notifier import TelegramError, TelegramNotifier
 
-WARNING_ICON = "\N{WARNING SIGN}\N{VARIATION SELECTOR-16}"
-OK_ICON = "\N{WHITE HEAVY CHECK MARK}"
-
 
 def check_once(
     collector: SystemMetricsCollector,
     specs: tuple[MetricSpec, ...],
-    state: dict[str, bool],
+    alerts: AlertTracker,
     notifier: TelegramNotifier,
 ) -> dict[str, MetricReading]:
-    """Collect one reading and notify only when a metric changes state."""
+    """Collect one reading, deliver pending alerts, and log the status."""
     readings = collector.collect(specs)
-    message = ""
+    warnings = {key: reading.is_warning for key, reading in readings.items()}
+    pending = alerts.pending(warnings)
 
-    for key, reading in readings.items():
-        if reading.is_warning and not state[key]:
-            message += (
-                f"{WARNING_ICON} WARNING - {reading.spec.label} "
-                f"{reading.spec.warning_description}! "
-                f"({round(reading.percent)}%)\n"
-            )
-            state[key] = True
-        elif not reading.is_warning and state[key]:
-            message += f"{OK_ICON} INFO - {reading.spec.label} back to normal\n"
-            state[key] = False
+    if pending:
+        if alerts.backing_off():
+            # A previous delivery failed; wait for the backoff window before
+            # trying again instead of hammering Telegram on every check.
+            pass
+        else:
+            message = format_alert(readings, pending)
+            summary = message.strip().replace("\n", " | ")
 
-    if message:
-        try:
-            notifier.send(message)
-        except TelegramError as error:
-            logger.error("Failed to send Telegram notification: {}", error)
+            try:
+                notifier.send(message)
+            except TelegramError as error:
+                if not error.retryable:
+                    alerts.abandon(pending)
+                    logger.critical(
+                        "Failed to send Telegram notification ({}): {}. This error is "
+                        "permanent; the alert will not be retried until the next state "
+                        "change. Check BOT_KEY/CHAT_ID and the bot's access to the chat.",
+                        summary,
+                        error,
+                    )
+                else:
+                    attempt, delay = alerts.failed(error.retry_after)
+                    logger.error(
+                        "Failed to send Telegram notification ({}): {}. Attempt {} failed; "
+                        "next try in at least {}s.",
+                        summary,
+                        error,
+                        attempt,
+                        delay,
+                    )
+            else:
+                failures = alerts.delivered(pending)
+                if failures:
+                    logger.info(
+                        "Telegram notification ({}) delivered after {} failed attempt(s).",
+                        summary,
+                        failures,
+                    )
+    elif alerts.failures:
+        # The situation went back to what the last delivered message already
+        # says, so the undelivered alert is no longer useful.
+        logger.info(
+            "Dropped the undelivered alert: the situation is back to "
+            "what you were last told."
+        )
+        alerts.forget_failures()
+
+    status = format_status(readings)
+    if any(warnings.values()):
+        logger.warning(status)
+    else:
+        logger.info(status)
 
     return readings
-
-
-def format_status(readings: dict[str, MetricReading]) -> str:
-    parts = []
-
-    for reading in readings.values():
-        value = reading.display
-        if reading.is_warning:
-            value += " WARNING"
-        parts.append(f"{reading.spec.label}: {value}")
-
-    return " | ".join(parts)
 
 
 def main() -> int:
@@ -77,16 +101,18 @@ def main() -> int:
 
     specs = build_metric_specs(config)
     collector = SystemMetricsCollector(config.procfs_path, config.disk_path)
+    alerts = AlertTracker([spec.key for spec in specs], config.repeat_interval)
     notifier = TelegramNotifier(config.bot_key, config.chat_id)
-    state = {spec.key: False for spec in specs}
 
+    reminders = f"every {config.repeat_interval}s" if config.repeat_interval else "off"
     logger.info(
         "System monitor started - interval: {}s | thresholds CPU/RAM/Disk: "
-        "{}%/{}%/{}%",
+        "{}%/{}%/{}% | reminders: {}",
         config.check_interval,
         config.cpu_threshold,
         config.ram_threshold,
         config.disk_threshold,
+        reminders,
     )
 
     try:
@@ -106,13 +132,7 @@ def main() -> int:
             started = time.monotonic()
 
             try:
-                readings = check_once(collector, specs, state, notifier)
-                status = format_status(readings)
-
-                if any(reading.is_warning for reading in readings.values()):
-                    logger.warning(status)
-                else:
-                    logger.info(status)
+                check_once(collector, specs, alerts, notifier)
             except (psutil.Error, OSError) as error:
                 logger.error("Check failed, retrying next cycle: {}", error)
 
